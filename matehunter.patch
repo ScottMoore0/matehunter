@@ -1,0 +1,584 @@
+diff --git a/engine.cpp b/engine.cpp
+index 3179efa..7488f33 100644
+--- a/engine.cpp
++++ b/engine.cpp
+@@ -105,6 +105,74 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
+       "MultiPV", Option(1, 1, MAX_MOVES));
+ 
+     options.add("Skill Level", Option(20, 0, 20));
++    {
++        extern bool mateEval, mateEvalNull;
++        extern int  mateEscapeW, mateCheckW, mateExposeW, mateDefendW, mateScale;
++        extern int  mateAttackW, mateNearW;
++        // MateEval with MateEvalNull is the recommended profile: the static
++        // evaluation is 0, so the only evaluation the search sees is the
++        // correction history it learns. With MateEvalNull off, MateEval uses
++        // the king-danger evaluator below. OnChange, so `eval` and any caller
++        // outside the search see the same values a search would.
++        options.add("MateEval", Option(true, [](const Option& o) {
++            mateEval = bool(o);
++            return std::nullopt;
++        }));
++        options.add("MateEvalNull", Option(true, [](const Option& o) {
++            mateEvalNull = bool(o);
++            return std::nullopt;
++        }));
++        // King-danger evaluator weights.
++        options.add("MateEscapeW", Option(220, 0, 2000, [](const Option& o) {
++            mateEscapeW = int(o);
++            return std::nullopt;
++        }));
++        // Percent scale on the attacker term; 0 removes it entirely.
++        options.add("MateAttackW", Option(100, 0, 1000, [](const Option& o) {
++            mateAttackW = int(o);
++            return std::nullopt;
++        }));
++        // Near-mate bonus: checked king, no escapes. 0 removes it.
++        options.add("MateNearW", Option(600, 0, 4000, [](const Option& o) {
++            mateNearW = int(o);
++            return std::nullopt;
++        }));
++        options.add("MateCheckW", Option(180, 0, 2000, [](const Option& o) {
++            mateCheckW = int(o);
++            return std::nullopt;
++        }));
++        options.add("MateExposeW", Option(40, 0, 2000, [](const Option& o) {
++            mateExposeW = int(o);
++            return std::nullopt;
++        }));
++        options.add("MateDefendW", Option(30, 0, 2000, [](const Option& o) {
++            mateDefendW = int(o);
++            return std::nullopt;
++        }));
++        options.add("MateScale", Option(8, 1, 128, [](const Option& o) {
++            mateScale = int(o);
++            return std::nullopt;
++        }));
++    }
++    // Route the king-danger evaluation to one consumer of the static
++    // evaluation: the main search (pruning, reductions and their margins) or
++    // quiescence (stand-pat and leaf values). MateEval routes it to both and
++    // overrides these.
++    options.add("MateEvalMain", Option(false));
++    options.add("MateEvalQS", Option(false));
++    // Switch off pruning that is unsound for proving mates. MateMode switches
++    // off all three and relieves one ply of reduction for checks.
++    options.add("MateMode", Option(false));
++    options.add("MateNoRazor", Option(false));
++    options.add("MateNoFutility", Option(false));
++    options.add("MateNoNull", Option(false));
++    // Switch off one consumer of the static evaluation per bit: 1 improving
++    // flags, 2 eval-difference move ordering, 4 ProbCut, 8 capture futility,
++    // 16 quiet futility, 32 move-count pruning, 64 LMR eval term,
++    // 128 quiescence futility, 256 correction history, 512 aspiration windows,
++    // 1024 history bonus scaling, 2048 correction history in the static
++    // evaluation only (256 removes it everywhere). 0 is stock.
++    options.add("MateEvalOff", Option(0, 0, 4095));
+ 
+     options.add("Move Overhead", Option(10, 0, 5000));
+ 
+diff --git a/evaluate.cpp b/evaluate.cpp
+index 7ec314f..faf0877 100644
+--- a/evaluate.cpp
++++ b/evaluate.cpp
+@@ -17,6 +17,7 @@
+ */
+ 
+ #include "evaluate.h"
++#include "attacks.h"
+ 
+ #include <algorithm>
+ #include <cassert>
+@@ -37,16 +38,126 @@
+ 
+ namespace Stockfish {
+ 
++using namespace Attacks;  // SF19 moved attacks_bb here
++
++// Defined in search.cpp.
++extern bool mateEvalNull;
++extern int  mateEscapeW, mateCheckW, mateExposeW, mateDefendW, mateScale;
++extern int  mateAttackW, mateNearW;
++
++namespace {
++
++// Mate-search king-danger evaluation. Returns a score from the side-to-move's
++// point of view measuring how close the opposing king is to being mated.
++// Written against SF18 primitives and ported unchanged to SF19; deliberately
++// ignores material and structure.
++template<Color Us>
++int king_danger_us(const Position& pos) {
++
++    constexpr Color Them = ~Us;
++
++    const Square   ksq  = pos.square<KING>(Them);
++    const Bitboard occ  = pos.pieces();
++    const Bitboard ring = attacks_bb<KING>(ksq);
++
++    // Squares we attack, built per piece type so attackers can be weighted.
++    Bitboard att[PIECE_TYPE_NB] = {0};
++    att[PAWN]   = pos.attacks_by<PAWN>(Us);
++    att[KNIGHT] = pos.attacks_by<KNIGHT>(Us);
++    att[BISHOP] = pos.attacks_by<BISHOP>(Us);
++    att[ROOK]   = pos.attacks_by<ROOK>(Us);
++    att[QUEEN]  = pos.attacks_by<QUEEN>(Us);
++    att[KING]   = pos.attacks_by<KING>(Us);
++
++    Bitboard ourAtt = att[PAWN] | att[KNIGHT] | att[BISHOP] | att[ROOK] | att[QUEEN] | att[KING];
++    Bitboard theirAtt = pos.attacks_by<PAWN>(Them)   | pos.attacks_by<KNIGHT>(Them)
++                      | pos.attacks_by<BISHOP>(Them) | pos.attacks_by<ROOK>(Them)
++                      | pos.attacks_by<QUEEN>(Them);
++
++    // 1. Escape squares: the single most predictive term. A king with no flight
++    //    squares is one check away from mate.
++    Bitboard escapes = ring & ~pos.pieces(Them) & ~ourAtt;
++    int nEscapes = popcount(escapes);
++
++    // 2. Attackers on the ring, weighted by how dangerous each piece is to a king.
++    static constexpr int W[PIECE_TYPE_NB] = {0, 12, 42, 38, 55, 90, 8};
++    int attackWeight = 0, nAttackers = 0;
++    for (PieceType pt = PAWN; pt <= KING; ++pt)
++        if (att[pt] & ring)
++        {
++            attackWeight += W[pt] * popcount(att[pt] & ring);
++            nAttackers++;
++        }
++
++    // 3. Defenders of the ring.
++    int nDefenders = popcount(theirAtt & ring);
++
++    // 4. Safe checks: squares from which we could check without being captured.
++    int safeChecks = 0;
++    Bitboard safe = ~pos.pieces(Us) & ~theirAtt;
++    safeChecks += popcount(attacks_bb<KNIGHT>(ksq)      & att[KNIGHT] & safe);
++    safeChecks += popcount(attacks_bb<BISHOP>(ksq, occ) & att[BISHOP] & safe);
++    safeChecks += popcount(attacks_bb<ROOK>(ksq, occ)   & att[ROOK]   & safe);
++    safeChecks += popcount((attacks_bb<BISHOP>(ksq, occ) | attacks_bb<ROOK>(ksq, occ))
++                           & att[QUEEN] & safe);
++
++    // 5. Exposure: mated kings are overwhelmingly on edges and in corners.
++    int fileEdge = std::min(int(file_of(ksq)), FILE_H - int(file_of(ksq)));
++    int rankEdge = std::min(int(rank_of(ksq)), RANK_8 - int(rank_of(ksq)));
++    int exposure = (3 - std::min(fileEdge, 3)) + (3 - std::min(rankEdge, 3));
++
++    // Combine. Danger rises superlinearly in the number of distinct attackers,
++    // and falls sharply with each available escape square.
++    // mateAttackW is a PERCENT scale: 100 leaves the term as it was.
++    int danger = attackWeight * (1 + nAttackers) / 2 * mateAttackW / 100
++               + mateCheckW  * safeChecks
++               + mateExposeW * exposure
++               - mateDefendW * nDefenders
++               - mateEscapeW * nEscapes;
++
++    // A king already in check with no escapes is nearly mated.
++    if (pos.checkers() && pos.side_to_move() == Them && nEscapes == 0)
++        danger += mateNearW;
++
++    return danger;
++}
++
++}  // namespace
++
++// Mate-search evaluation: king danger from the side-to-move's perspective.
++Value Eval::mate_eval(const Position& pos) {
++    // MateEvalNull: a constant evaluation, so the correction history the search
++    // adds to it is the whole of the static evaluation.
++    if (mateEvalNull)
++        return VALUE_ZERO;
++    int d = pos.side_to_move() == WHITE
++          ? king_danger_us<WHITE>(pos) - king_danger_us<BLACK>(pos)
++          : king_danger_us<BLACK>(pos) - king_danger_us<WHITE>(pos);
++    // Scale into a centipawn-like range and clamp well clear of the mate and
++    // tablebase bands. Returning raw danger units gave scores near cp 5905 that
++    // barely moved, which disables futility/razoring and breaks aspiration.
++    d /= std::max(1, mateScale);
++    return Value(std::clamp(d, -2000, 2000));
++}
++
+ // Evaluate is the evaluator for the outer world. It returns a static evaluation
+ // of the position from the point of view of the side to move.
+ Value Eval::evaluate(const Eval::NNUE::Network&     network,
+                      const Position&                pos,
+                      Eval::NNUE::AccumulatorStack&  accumulators,
+                      Eval::NNUE::AccumulatorCaches& caches,
+-                     int                            optimism) {
++                     int                            optimism,
++                     bool                           useMate) {
+ 
+     assert(!pos.checkers());
+ 
++    // Mate-search profile: report king danger rather than game outcome.
++    // Checked BEFORE the NNUE evaluation, which it would only discard. The
++    // caller decides per call site, so the search can route this evaluation
++    // to one consumer of the static eval and not another.
++    if (useMate)
++        return mate_eval(pos);
++
+     auto [psqt, positional] = network.evaluate(pos, accumulators, caches);
+ 
+     Value nnue = psqt + positional;
+diff --git a/evaluate.h b/evaluate.h
+index 84e7c09..24eb5a3 100644
+--- a/evaluate.h
++++ b/evaluate.h
+@@ -47,7 +47,9 @@ Value evaluate(const NNUE::Network&           network,
+                const Position&                pos,
+                Eval::NNUE::AccumulatorStack&  accumulators,
+                Eval::NNUE::AccumulatorCaches& caches,
+-               int                            optimism);
++               int                            optimism,
++               bool                           useMate = false);
++Value mate_eval(const Position& pos);
+ }  // namespace Eval
+ 
+ }  // namespace Stockfish
+diff --git a/misc.cpp b/misc.cpp
+index b05e8e8..dda9fb3 100644
+--- a/misc.cpp
++++ b/misc.cpp
+@@ -140,7 +140,9 @@ class Logger {
+ //      Stockfish version
+ std::string engine_version_info() {
+     std::stringstream ss;
+-    ss << "Stockfish " << version << std::setfill('0');
++    // MateHunter's version, followed by the Stockfish release it derives from.
++    // `id author` and every source header still credit the Stockfish developers.
++    ss << "MateHunter 0.1.0 (Stockfish " << version << ")" << std::setfill('0');
+ 
+     if constexpr (version == "dev")
+     {
+diff --git a/search.cpp b/search.cpp
+index b7e6329..79cc3eb 100644
+--- a/search.cpp
++++ b/search.cpp
+@@ -66,6 +66,32 @@ void syzygy_extend_pv(const OptionsMap&            options,
+ 
+ using namespace Search;
+ 
++// Mate-search options, cached once per search from the UCI options so the hot
++// path does not do a map lookup per node. Written before the search threads
++// start and read-only thereafter. engine.cpp and evaluate.cpp also read some.
++bool mateEval     = false;
++bool mateEvalNull = true;   // with mateEval, the recommended profile
++int  mateEscapeW = 220, mateCheckW = 180, mateExposeW = 40,
++     mateDefendW = 30,  mateScale  = 8;
++// Attacker pressure, as a percent scale since attackWeight is a computed sum
++// rather than a coefficient, and the near-mate bonus for a checked king with
++// no escape squares.
++int  mateAttackW = 100, mateNearW = 600;
++// Pruning switched off for mate search, and reduction relief for checks in
++// 1024ths of a ply. MateMode sets all four.
++bool mateNoRazor = false, mateNoFutility = false, mateNoNull = false;
++int  mateCheckRelief = 0;
++// Which consumers of the static evaluation receive the king-danger score.
++// MateEval routes it to both; MateEvalMain and MateEvalQS route it to one.
++// When they differ, an evaluation cached in the TT by one channel must not be
++// served to the other, so cached evaluations are recomputed instead.
++bool mateEvalMain = false;
++bool mateEvalQS   = false;
++bool mateSplit    = false;
++// Each bit switches off one consumer of the static evaluation. The bits are
++// listed with the option in engine.cpp.
++int  mateEvalOff  = 0;
++
+ namespace {
+ 
+ constexpr u64 NODES_LIMIT_OUTPUT = 10'000'000;
+@@ -212,6 +238,30 @@ void Search::Worker::start_searching() {
+         return;
+     }
+ 
++    // Cache the mate-search options BEFORE any thread begins searching.
++    // Must precede threads.start_searching(); setting them afterwards leaves
++    // the search running on the previous values.
++    const bool mateMode = bool(options["MateMode"]);
++    mateEval     = bool(options["MateEval"]);
++    mateEscapeW  = int(options["MateEscapeW"]);
++    mateCheckW   = int(options["MateCheckW"]);
++    mateExposeW  = int(options["MateExposeW"]);
++    mateDefendW  = int(options["MateDefendW"]);
++    mateScale    = int(options["MateScale"]);
++    mateAttackW  = int(options["MateAttackW"]);
++    mateNearW    = int(options["MateNearW"]);
++    // MateMode switches off all three prunings and relieves one ply (1024)
++    // of reduction for checks; the individual switches add to it.
++    mateNoRazor     = bool(options["MateNoRazor"])    || mateMode;
++    mateNoFutility  = bool(options["MateNoFutility"]) || mateMode;
++    mateNoNull      = bool(options["MateNoNull"])     || mateMode;
++    mateCheckRelief = mateMode ? 1024 : 0;
++    // The two evaluation channels; MateEval overrides both.
++    mateEvalMain = mateEval || bool(options["MateEvalMain"]);
++    mateEvalQS   = mateEval || bool(options["MateEvalQS"]);
++    mateSplit    = mateEvalMain != mateEvalQS;
++    mateEvalOff  = int(options["MateEvalOff"]);
++
+     // Main thread starts non-main threads, and begins own search
+     threads.start_searching();
+     bool uciPvSent = iterative_deepening();
+@@ -374,6 +424,8 @@ bool Search::Worker::iterative_deepening() {
+ 
+             // Reset aspiration window starting size
+             delta     = 5 + threadIdx % 8 + std::abs(rootMoves[pvIdx].meanSquaredScore) / 10193;
++            if (mateEvalOff & 512)
++                delta = VALUE_INFINITE;
+             Value avg = rootMoves[pvIdx].averageScore;
+             alpha     = std::max(avg - delta, -VALUE_INFINITE);
+             beta      = std::min(avg + delta, VALUE_INFINITE);
+@@ -787,7 +839,7 @@ Value Search::Worker::search(
+         // Step 2. Check for aborted search or immediate draw
+         if (threads.stop.load(std::memory_order_relaxed) || pos.is_draw(ss->ply)
+             || ss->ply >= MAX_PLY)
+-            return (ss->ply >= MAX_PLY && !ss->inCheck) ? evaluate(pos) : value_draw(nodes);
++            return (ss->ply >= MAX_PLY && !ss->inCheck) ? evaluate(pos, mateEvalMain) : value_draw(nodes);
+ 
+         // Step 3. Mate distance pruning. Even if we mate at the next move our score
+         // would be at best mate_in(ss->ply + 1), but if alpha is already bigger because
+@@ -809,7 +861,7 @@ Value Search::Worker::search(
+     ss->statScore       = 0;
+     (ss + 2)->cutoffCnt = 0;
+ 
+-    const auto correctionValue = correction_value(*this, pos, ss);
++    const auto correctionValue = (mateEvalOff & 256) ? 0 : correction_value(*this, pos, ss);
+ 
+     // Step 4. Transposition table lookup
+     excludedMove                   = ss->excludedMove;
+@@ -833,11 +885,11 @@ Value Search::Worker::search(
+     else if (ss->ttHit)
+     {
+         // Never assume anything about values stored in TT
+-        unadjustedStaticEval = ttData.eval;
++        unadjustedStaticEval = mateSplit ? VALUE_NONE : ttData.eval;
+         if (!is_valid(unadjustedStaticEval))
+-            unadjustedStaticEval = evaluate(pos);
++            unadjustedStaticEval = evaluate(pos, mateEvalMain);
+ 
+-        ss->staticEval = eval = to_corrected_static_eval(unadjustedStaticEval, correctionValue);
++        ss->staticEval = eval = to_corrected_static_eval(unadjustedStaticEval, (mateEvalOff & 2048) ? 0 : correctionValue);
+ 
+         // ttValue can be used as a better position evaluation
+         if (is_valid(ttData.value)
+@@ -846,8 +898,8 @@ Value Search::Worker::search(
+     }
+     else
+     {
+-        unadjustedStaticEval = evaluate(pos);
+-        ss->staticEval = eval = to_corrected_static_eval(unadjustedStaticEval, correctionValue);
++        unadjustedStaticEval = evaluate(pos, mateEvalMain);
++        ss->staticEval = eval = to_corrected_static_eval(unadjustedStaticEval, (mateEvalOff & 2048) ? 0 : correctionValue);
+ 
+         // Static evaluation is saved as it was before adjustment by correction history
+         ttWriter.write(posKey, VALUE_NONE, ss->ttPv, BOUND_NONE, DEPTH_UNSEARCHED, Move::none(),
+@@ -860,13 +912,13 @@ Value Search::Worker::search(
+     // false otherwise. The improving flag is used in various pruning heuristics.
+     // Similarly, opponentWorsening is true if our static evaluation is better
+     // for us than at the last ply.
+-    improving         = ss->staticEval > (ss - 2)->staticEval;
+-    opponentWorsening = ss->staticEval > -(ss - 1)->staticEval;
++    improving         = !(mateEvalOff & 1) && ss->staticEval > (ss - 2)->staticEval;
++    opponentWorsening = !(mateEvalOff & 1) && ss->staticEval > -(ss - 1)->staticEval;
+ 
+     // Hindsight adjustment of reductions based on static evaluation difference
+-    if (priorReduction >= 3 && !opponentWorsening)
++    if (!(mateEvalOff & 1) && priorReduction >= 3 && !opponentWorsening)
+         depth++;
+-    if (priorReduction >= 2 && depth >= 2 && ss->staticEval + (ss - 1)->staticEval > 166)
++    if (!(mateEvalOff & 1) && priorReduction >= 2 && depth >= 2 && ss->staticEval + (ss - 1)->staticEval > 166)
+         depth--;
+ 
+     // Step 6. At non-PV nodes we check for an early TT cutoff. Note that we
+@@ -976,7 +1028,7 @@ Value Search::Worker::search(
+         goto moves_loop;
+ 
+     // Use static evaluation difference to improve quiet move ordering
+-    if (((ss - 1)->currentMove).is_ok() && !(ss - 1)->inCheck && !priorCapture)
++    if (!(mateEvalOff & 2) && ((ss - 1)->currentMove).is_ok() && !(ss - 1)->inCheck && !priorCapture)
+     {
+         int evalDiff = std::clamp(-int((ss - 1)->staticEval + ss->staticEval), -189, 194) + 60;
+         mainHistory[~us][((ss - 1)->currentMove).raw()] << evalDiff * 11;
+@@ -988,12 +1040,12 @@ Value Search::Worker::search(
+ 
+     // Step 8. Razoring
+     // If eval is really low, skip search entirely and return the qsearch value
+-    if (!PvNode && eval < alpha - 482 * depth * depth)
++    if (!mateNoRazor && !PvNode && eval < alpha - 482 * depth * depth)
+         return qsearch<NonPV>(pos, ss, alpha, beta);
+ 
+     // Step 9. Futility pruning: child node
+     // The depth condition is important for mate finding. It should NOT be tuned.
+-    if (!ss->ttPv && depth < (seekMate ? 6 : 19) && eval >= beta && (!ttData.move || ttCapture)
++    if (!mateNoFutility && !ss->ttPv && depth < (seekMate ? 6 : 19) && eval >= beta && (!ttData.move || ttCapture)
+         && !is_loss(beta) && !is_win(eval))
+     {
+         Value futilityMult = std::min(45 + depth * 4, 85);
+@@ -1008,7 +1060,7 @@ Value Search::Worker::search(
+     }
+ 
+     // Step 10. Null move search with verification search
+-    if (cutNode && ss->staticEval >= beta - 13 * depth - 47 * improving + 365 && !excludedMove
++    if (!mateNoNull && cutNode && ss->staticEval >= beta - 13 * depth - 47 * improving + 365 && !excludedMove
+         && pos.non_pawn_material(us) && ss->ply >= nmpMinPly && beta >= -2000)
+     {
+         assert((ss - 1)->currentMove != Move::null());
+@@ -1043,7 +1095,7 @@ Value Search::Worker::search(
+         }
+     }
+ 
+-    improving |= ss->staticEval >= beta;
++    improving |= !(mateEvalOff & 1) && ss->staticEval >= beta;
+ 
+     // Step 11. Internal iterative reductions
+     // At sufficient depth, reduce depth for PV/Cut nodes without a TTMove.
+@@ -1055,7 +1107,7 @@ Value Search::Worker::search(
+     // If we have a good enough capture (or queen promotion) and a reduced search
+     // returns a value much above beta, we can (almost) safely prune the previous move.
+     probCutBeta = beta + 241 - 64 * improving;
+-    if (depth >= 3 && !is_decisive(beta) && !(is_valid(ttData.value) && ttData.value < probCutBeta))
++    if (!(mateEvalOff & 4) && depth >= 3 && !is_decisive(beta) && !(is_valid(ttData.value) && ttData.value < probCutBeta))
+     {
+         assert(probCutBeta < VALUE_INFINITE && probCutBeta > beta);
+ 
+@@ -1166,7 +1218,7 @@ moves_loop:  // When in check, search starts here
+         if (!rootNode && pos.non_pawn_material(us) && !is_loss(bestValue))
+         {
+             // Skip quiet moves if movecount exceeds our threshold
+-            if (moveCount >= (3 + depth * depth) / (2 - improving))
++            if (!(mateEvalOff & 32) && moveCount >= (3 + depth * depth) / (2 - improving))
+                 mp.skip_quiet_moves();
+ 
+             // Reduced depth of the next LMR search
+@@ -1178,7 +1230,7 @@ moves_loop:  // When in check, search starts here
+                 int   captHist = captureHistory[movedPiece][move.to_sq()][type_of(capturedPiece)];
+ 
+                 // Futility pruning for captures
+-                if (!givesCheck && lmrDepth < 8)
++                if (!(mateEvalOff & 8) && !givesCheck && lmrDepth < 8)
+                 {
+                     Value futilityValue = ss->staticEval + 234 + 247 * lmrDepth
+                                         + PieceValue[capturedPiece] + 134 * captHist / 1024;
+@@ -1215,7 +1267,7 @@ moves_loop:  // When in check, search starts here
+ 
+                 // Futility pruning: parent node
+                 // (*Scaler): Generally, more frequent futility pruning scales well
+-                if (!ss->inCheck && lmrDepth < 12 && futilityValue <= alpha)
++                if (!(mateEvalOff & 16) && !ss->inCheck && lmrDepth < 12 && futilityValue <= alpha)
+                 {
+                     if (bestValue <= futilityValue && !is_decisive(bestValue)
+                         && !is_win(futilityValue))
+@@ -1351,13 +1403,19 @@ moves_loop:  // When in check, search starts here
+         // Decrease/increase reduction for moves with a good/bad history
+         r -= ss->statScore * 439 / 4096;
+ 
+-        if (!capture && !is_decisive(alpha))
++        if (!(mateEvalOff & 64) && !capture && !is_decisive(alpha))
+             r += 3 * std::clamp(alpha - eval, -64, 96);
+ 
+         // Scale up reductions for expected ALL nodes
+         if (allNode)
+             r += r * 276 / (256 * depth + 268);
+ 
++        // Mate-search profile: relieve reduction for checks rather than
++        // extending them. Reductions are in 1024ths of a ply, so one ply of
++        // relief is 1024.
++        if (mateCheckRelief > 0 && givesCheck && r > 0)
++            r -= mateCheckRelief;
++
+         // Apply the computed LMR
+         if (depth >= 2 && moveCount > 1)
+         {
+@@ -1582,8 +1640,8 @@ moves_loop:  // When in check, search starts here
+         bonusScale -= (ss - 1)->statScore / 98;
+         bonusScale += std::min(59 * depth, 420);
+         bonusScale += 186 * ((ss - 1)->moveCount > 9);
+-        bonusScale += 142 * (!ss->inCheck && bestValue <= ss->staticEval - 106);
+-        bonusScale += 159 * (!(ss - 1)->inCheck && bestValue <= -(ss - 1)->staticEval - 68);
++        bonusScale += 142 * (!(mateEvalOff & 1024) && !ss->inCheck && bestValue <= ss->staticEval - 106);
++        bonusScale += 159 * (!(mateEvalOff & 1024) && !(ss - 1)->inCheck && bestValue <= -(ss - 1)->staticEval - 68);
+ 
+         bonusScale = std::max(bonusScale, 0);
+ 
+@@ -1692,7 +1750,7 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
+ 
+     // Step 2. Check for an immediate draw or maximum ply reached
+     if (pos.is_draw(ss->ply) || ss->ply >= MAX_PLY)
+-        return (ss->ply >= MAX_PLY && !ss->inCheck) ? evaluate(pos) : VALUE_DRAW;
++        return (ss->ply >= MAX_PLY && !ss->inCheck) ? evaluate(pos, mateEvalQS) : VALUE_DRAW;
+ 
+     assert(0 <= ss->ply && ss->ply < MAX_PLY);
+ 
+@@ -1716,18 +1774,18 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
+         bestValue = futilityBase = -VALUE_INFINITE;
+     else
+     {
+-        const auto correctionValue = correction_value(*this, pos, ss);
++        const auto correctionValue = (mateEvalOff & 256) ? 0 : correction_value(*this, pos, ss);
+ 
+         if (ss->ttHit)
+         {
+             // Never assume anything about values stored in TT
+-            unadjustedStaticEval = ttData.eval;
++            unadjustedStaticEval = mateSplit ? VALUE_NONE : ttData.eval;
+ 
+             if (!is_valid(unadjustedStaticEval))
+-                unadjustedStaticEval = evaluate(pos);
++                unadjustedStaticEval = evaluate(pos, mateEvalQS);
+ 
+             ss->staticEval = bestValue =
+-              to_corrected_static_eval(unadjustedStaticEval, correctionValue);
++              to_corrected_static_eval(unadjustedStaticEval, (mateEvalOff & 2048) ? 0 : correctionValue);
+ 
+             // ttValue can be used as a better position evaluation
+             if (is_valid(ttData.value) && !is_decisive(ttData.value)
+@@ -1736,9 +1794,9 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
+         }
+         else
+         {
+-            unadjustedStaticEval = evaluate(pos);
++            unadjustedStaticEval = evaluate(pos, mateEvalQS);
+             ss->staticEval       = bestValue =
+-              to_corrected_static_eval(unadjustedStaticEval, correctionValue);
++              to_corrected_static_eval(unadjustedStaticEval, (mateEvalOff & 2048) ? 0 : correctionValue);
+         }
+ 
+         // Stand pat. Return immediately if static value is at least beta
+@@ -1797,14 +1855,14 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
+ 
+                 // If static eval + value of piece we are going to capture is
+                 // much lower than alpha, we can prune this move.
+-                if (futilityValue <= alpha)
++                if (!(mateEvalOff & 128) && futilityValue <= alpha)
+                 {
+                     bestValue = std::max(bestValue, futilityValue);
+                     continue;
+                 }
+ 
+                 // If static exchange evaluation is low enough, we can prune
+-                if (!pos.see_ge(move, alpha - futilityBase))
++                if (!(mateEvalOff & 128) && !pos.see_ge(move, alpha - futilityBase))
+                 {
+                     bestValue = std::max(bestValue, std::min(alpha, futilityBase));
+                     continue;
+@@ -1898,9 +1956,9 @@ TimePoint Search::Worker::elapsed() const {
+ 
+ // Evaluate the current position of the game tree, from the point of view of
+ // the side to move.
+-Value Search::Worker::evaluate(const Position& pos) {
++Value Search::Worker::evaluate(const Position& pos, bool useMate) {
+     return Eval::evaluate(network[numaAccessToken], pos, accumulatorStack, refreshTable,
+-                          optimism[pos.side_to_move()]);
++                          optimism[pos.side_to_move()], useMate);
+ }
+ 
+ namespace {
+diff --git a/search.h b/search.h
+index 472e6eb..73bd5be 100644
+--- a/search.h
++++ b/search.h
+@@ -384,7 +384,7 @@ class Worker {
+ 
+     TimePoint elapsed() const;
+ 
+-    Value evaluate(const Position&);
++    Value evaluate(const Position&, bool useMate = false);
+ 
+     LimitsType limits;
+ 
