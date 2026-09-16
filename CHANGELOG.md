@@ -8,6 +8,21 @@ from.
 The UCI options are the interface. An option may be *added* without a major
 bump; an existing option's meaning or default will not change without one.
 
+## Documentation correction - 2026-09-16
+
+No change to the patch or the engine.
+
+- **The ChestUCI results are in-sample.** `README.md`, `FINDINGS.md` and the
+  0.1.0 entry below describe ChestUCI as a corpus neither engine was tuned on.
+  MateHunter's profile was chosen on matetrack, which contains 6,526 of
+  ChestUCI's 6,545 positions.
+- **Out of sample there is no advantage over stock Stockfish 19** on the
+  positions measured: on 972 held-out generated mates in 1 to 9, level at 10M
+  nodes (963 each, +5/-5) and behind at 100k nodes (815 against 872) and 10k
+  nodes (642 against 767). Huntsman 1 solved more than either at every budget.
+  Whether an advantage appears at mate in 10 and deeper is not settled.
+- The 0.1.0 entry is left as released.
+
 ## 0.1.0 - 2026-09-14
 
 **First release: a patch against Stockfish 19** (tag `sf_19`, commit

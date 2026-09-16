@@ -6,8 +6,15 @@ more forced mates than stock Stockfish. The measurements below show that the
 king-danger terms are not why. The gain comes from replacing NNUE's evaluation
 with **the correction history Stockfish learns during the search**.
 
-Every number here is from ChestUCI, a mate corpus neither engine was tuned on,
-with one thread, every mate option set explicitly, and results paired position
+**Correction, 2026-09-16: these results are in-sample for MateHunter.** Its
+options and profile were chosen on matetrack, which contains 6,526 of ChestUCI's
+6,545 positions. On 4,934 generated positions outside both corpora it shows no
+advantage over stock Stockfish 19: level at 10M nodes (+5/-5 on the held-out
+972) and behind at 100k and 10k nodes. Those positions are mates in 1 to 9, so
+an advantage at greater depth is neither shown nor ruled out. `README.md` gives
+the numbers. What follows describes MateHunter on ChestUCI.
+
+Every number here is from ChestUCI, with one thread, every mate option set explicitly, and results paired position
 by position. "+A/−B" counts positions only the first arm solved against
 positions only the second solved; p is a two-sided sign test on those counts.
 
