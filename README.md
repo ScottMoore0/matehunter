@@ -86,8 +86,17 @@ by MateProver, none refuted:
 
 The set was split 20/80 by a salt committed before any engine ran, and the two
 parts agree. Its mates are short, 1 to 9 moves, where ChestUCI's gain was
-measured at 10 and more, so these positions do not rule out an advantage at
-depth; they do not show one either. The 19 ChestUCI positions not in matetrack
+measured at 10 and more.
+
+A second measurement, planned before it ran, tested whether the gain appears
+with depth, on 2,428 further generated positions taken one mate length at a
+time. It found no depth at which the recommended profile finds more mates than
+stock Stockfish 19. At 10M nodes the two are within a few positions up to mate in
+5, and MateHunter is behind from mate in 6: +3/-20 at mate in 6 (p = 0.0005),
++13/-25 at mate in 7 and +13/-23 at mate in 8. At 100k nodes it solves 11 of 297
+mates in 8, against 44 for Stockfish 19 and 92 for Huntsman 1. Whether an
+advantage appears at mate in 10 and deeper, where no generated positions exist
+yet, is not settled. The 19 ChestUCI positions not in matetrack
 are too few to decide it: at 10M nodes MateHunter solved 5, Stockfish 19 4 and
 Huntsman 1 7.
 
