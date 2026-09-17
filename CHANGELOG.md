@@ -21,6 +21,13 @@ No change to the patch or the engine.
   in 9 (+86/-40), a much smaller margin than on ChestUCI. At 1 second it is level
   at mate in 6 to 8 and behind at 9 to 11 (+100/-137), where the full king-danger
   evaluator does better.
+- **Measured at 0.5, 2 and 10 seconds as well:** the recommended profile
+  overtakes stock at about 2 seconds a position on mate in 9 to 11, and the full
+  king-danger evaluator is the better profile below that.
+- **Huntsman 1 at equal time:** ahead of both profiles and of stock at every
+  clock from 0.5 to 10 seconds, at p < 0.0001 (+74/-6 against the recommended
+  profile at 5 seconds on mate in 10 and 11). The ChestUCI comparison, where
+  MateHunter led it, is in-sample.
 
 ## Documentation correction - 2026-09-16
 

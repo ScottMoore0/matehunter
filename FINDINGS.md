@@ -11,9 +11,12 @@ profile were chosen on matetrack, which contains 6,526 of ChestUCI's 6,545
 positions. On generated positions outside both corpora the advantage is far
 smaller and depends on the clock: at 5 seconds the recommended profile finds
 about 12% more mates than stock Stockfish 19 at mate in 10 and 11 (+39/-20,
-repeated as +42/-20), against 74% more on ChestUCI; at 1 second it is no better
-than stock, and the full king-danger evaluator does better; at equal nodes it is
-never ahead, because it searches about 2.7 times as many nodes per second.
+repeated as +42/-20), against 74% more on ChestUCI; below about 2 seconds it is
+behind stock, and the full king-danger evaluator does better; at equal nodes it
+is never ahead, because it searches about 2.7 times as many nodes per second.
+Huntsman 1, which MateHunter beats on ChestUCI below, is ahead of both profiles
+out of sample at every clock and depth measured (+74/-6 at 5 seconds on mate in
+10 and 11).
 `README.md` gives the numbers. What follows describes MateHunter on ChestUCI.
 
 Every number here is from ChestUCI, with one thread, every mate option set
