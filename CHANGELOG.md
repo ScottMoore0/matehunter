@@ -8,6 +8,20 @@ from.
 The UCI options are the interface. An option may be *added* without a major
 bump; an existing option's meaning or default will not change without one.
 
+## Documentation correction - 2026-09-17
+
+No change to the patch or the engine.
+
+- **The 2026-09-16 correction below compared the engines at equal nodes
+  only**, and its "no advantage" holds only there. The recommended profile
+  searches about 2.7 times as many nodes per second as stock Stockfish 19, so at
+  equal time it has more search.
+- **At equal time, out of sample:** at 5 seconds it is ahead of stock at mate in
+  10 and 11 (180 against 161, +39/-20, p = 0.018; repeated, +42/-20) and at mate
+  in 9 (+86/-40), a much smaller margin than on ChestUCI. At 1 second it is level
+  at mate in 6 to 8 and behind at 9 to 11 (+100/-137), where the full king-danger
+  evaluator does better.
+
 ## Documentation correction - 2026-09-16
 
 No change to the patch or the engine.
