@@ -20,7 +20,9 @@ No change to the patch or the engine.
   positions measured: on 972 held-out generated mates in 1 to 9, level at 10M
   nodes (963 each, +5/-5) and behind at 100k nodes (815 against 872) and 10k
   nodes (642 against 767). Huntsman 1 solved more than either at every budget.
-  Whether an advantage appears at mate in 10 and deeper is not settled.
+  Measured one mate length at a time on further generated positions, it is
+  not ahead at any depth from mate in 1 to 11: +25/-37 at mate in 10 and 11
+  together at 10M nodes. Mate in 12 and deeper is untested.
 - The 0.1.0 entry is left as released.
 
 ## 0.1.0 - 2026-09-14

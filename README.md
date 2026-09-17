@@ -88,15 +88,26 @@ The set was split 20/80 by a salt committed before any engine ran, and the two
 parts agree. Its mates are short, 1 to 9 moves, where ChestUCI's gain was
 measured at 10 and more.
 
-A second measurement, planned before it ran, tested whether the gain appears
-with depth, on 2,428 further generated positions taken one mate length at a
-time. It found no depth at which the recommended profile finds more mates than
-stock Stockfish 19. At 10M nodes the two are within a few positions up to mate in
-5, and MateHunter is behind from mate in 6: +3/-20 at mate in 6 (p = 0.0005),
-+13/-25 at mate in 7 and +13/-23 at mate in 8. At 100k nodes it solves 11 of 297
-mates in 8, against 44 for Stockfish 19 and 92 for Huntsman 1. Whether an
-advantage appears at mate in 10 and deeper, where no generated positions exist
-yet, is not settled. The 19 ChestUCI positions not in matetrack
+Two further measurements, each planned before it ran, tested whether the gain
+appears with depth, on 3,421 more generated positions taken one mate length at a
+time up to mate in 11. At no depth is the recommended profile ahead of stock
+Stockfish 19. At 10M nodes:
+
+| mate in | positions | Stockfish 19 | recommended profile | Huntsman 1 | MateHunter vs Stockfish |
+| --- | --- | --- | --- | --- | --- |
+| 1 to 5 | 1,238 | 1,216 | 1,216 | 1,238 | within 1 or 2 at each |
+| 6 | 407 | 390 | 373 | 402 | +3/-20, p = 0.0005 |
+| 7 | 486 | 418 | 406 | 438 | +13/-25, p = 0.07 |
+| 8 | 297 | 210 | 200 | 233 | +13/-23, p = 0.13 |
+| 9 | 689 | 455 | 436 | 537 | +50/-69, p = 0.10 |
+| 10 and 11 | 304 | 181 | 169 | 248 | +25/-37, p = 0.16 |
+
+On ChestUCI at mate in 10 to 13 the same comparison was +478/-59. At 100k nodes
+the recommended profile solves none of the 304 mates in 10 and 11, against 19
+for Stockfish 19 and 73 for Huntsman 1. The rows up to mate in 8 include 39
+positions no game can reach, which Stockfish and MateHunter refuse and Huntsman
+accepts; without them MateHunter against Stockfish is unchanged.
+Mate in 12 and deeper, and composed problems not in matetrack, are untested. The 19 ChestUCI positions not in matetrack
 are too few to decide it: at 10M nodes MateHunter solved 5, Stockfish 19 4 and
 Huntsman 1 7.
 
