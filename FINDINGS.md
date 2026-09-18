@@ -17,7 +17,8 @@ is never ahead, because it searches about 2.7 times as many nodes per second.
 Huntsman 1, which MateHunter beats on ChestUCI below, is ahead of both profiles
 out of sample at every clock and depth measured (+74/-6 at 5 seconds on mate in
 10 and 11).
-`README.md` gives the numbers. What follows describes MateHunter on ChestUCI.
+`README.md` gives the numbers, and [MateBench](https://github.com/ScottMoore0/matebench) holds the positions, the
+plans and the logs. What follows describes MateHunter on ChestUCI.
 
 Every number here is from ChestUCI, with one thread, every mate option set
 explicitly, and results paired position by position. "+A/−B" counts positions only the first arm solved against
